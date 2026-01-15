@@ -4,14 +4,12 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-// Se você não instalou o rimraf, pode manter usando o fs.rm nativo como abaixo
-// import { rimraf } from 'rimraf'; 
 
-// === CONFIGURAÇÕES ===
+// Configuração Dinâmica para o Render (process.env.PORT)
 const CONFIG = {
   DOWNLOAD_ROOT: 'downloads',
-  PORT: 8080,
-  METADATA_TIMEOUT: 20000, // Aumentei um pouco para garantir em conexões lentas
+  PORT: process.env.PORT || 8080,
+  METADATA_TIMEOUT: 40000, 
   CLEANUP_GRACE_PERIOD: 5000, 
 };
 
@@ -20,7 +18,6 @@ const app = express();
 
 app.use(cors());
 
-// Garante pasta de downloads
 if (!fs.existsSync(CONFIG.DOWNLOAD_ROOT)) {
   fs.mkdirSync(CONFIG.DOWNLOAD_ROOT);
 }
@@ -31,15 +28,13 @@ class StreamSession {
     this.infoHash = null;
     this.client = new WebTorrent({ maxConns: 100 });
     this.folderPath = path.join(CONFIG.DOWNLOAD_ROOT, Date.now().toString() + '_' + Math.random().toString(36).substr(2, 9));
-    this.file = null;
+    this.files = []; 
     this.ready = false;
     this.viewers = 0;
     this.cleanupTimer = null;
-    this.isDestroyed = false; // TRAVA DE SEGURANÇA 1
+    this.isDestroyed = false;
     
-    this.client.on('error', (err) => {
-      console.error(`🔥 [SESSION ERROR] ${this.infoHash}:`, err.message);
-    });
+    this.client.on('error', (err) => console.error(`🔥 [SESSION ERROR]`, err.message));
   }
 
   initialize() {
@@ -55,14 +50,9 @@ class StreamSession {
         this.client.add(this.magnet, { path: this.folderPath }, (torrent) => {
           clearTimeout(timeout);
           this.infoHash = torrent.infoHash;
+          this.files = torrent.files.filter(f => f.name.match(/\.(mp4|mkv|avi|webm|mov)$/i));
           this.ready = true;
-          
-          this.file = torrent.files.find(f => f.name.match(/\.(mp4|mkv|avi|webm)$/i));
-          if (!this.file) {
-             this.file = torrent.files.reduce((a, b) => (a.length > b.length ? a : b));
-          }
-
-          console.log(`🚀 [READY] Torrent pronto: ${this.file.name}`);
+          console.log(`🚀 [READY] Torrent carregado. ${this.files.length} vídeos.`);
           resolve(this);
         });
       } catch (err) {
@@ -73,11 +63,71 @@ class StreamSession {
     });
   }
 
+  selectFile(season, episode) {
+    if (!this.files || this.files.length === 0) return null;
+
+    if (!season || !episode || season === 'undefined') {
+      return this.files.reduce((a, b) => (a.length > b.length ? a : b));
+    }
+
+    const s = parseInt(season);
+    const e = parseInt(episode);
+    console.log(`🔎 [SMART SELECT] Buscando S${s}E${e}...`);
+
+    // 1. REGEX EXATO
+    const exactRegex = new RegExp(`(S0?${s}.*E0?${e}(?![0-9]))|(\\b${s}x0?${e}(?![0-9]))`, 'i');
+    let target = this.files.find(f => f.name.match(exactRegex));
+
+    if (target) {
+      console.log(`✅ [MATCH] Arquivo: ${target.name}`);
+      return target;
+    }
+
+    // 2. FALLBACK POR ÍNDICE
+    if (this.files.length > 1) {
+      const sortedFiles = [...this.files].sort((a, b) => 
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
+      
+      const index = e - 1;
+      const candidate = sortedFiles[index];
+
+      if (candidate) {
+        // Validação: Se o candidato diz ser OUTRO episódio, rejeita.
+        const wrongEpRegex = /(?:E|Episode)[ ._-]*(\d+)(?![0-9])/i;
+        const match = candidate.name.match(wrongEpRegex);
+        
+        if (match && parseInt(match[1]) !== e) {
+           console.warn(`❌ [REJECTED] Fallback é Ep ${match[1]}, queríamos ${e}.`);
+           return null;
+        }
+        return candidate;
+      }
+    }
+
+    // 3. ARQUIVO ÚNICO (Com Trava de Segurança)
+    if (this.files.length === 1) {
+       const f = this.files[0];
+       const epCheckRegex = /(?:S\d+[ ._-]*E|x|Episode[ ._-]*)(\d+)(?![0-9])/i;
+       const match = f.name.match(epCheckRegex);
+       
+       if (match) {
+         const fileEp = parseInt(match[1]);
+         if (fileEp !== e) {
+            console.error(`❌ [MISMATCH] Arquivo único é Ep ${fileEp}, solicitado ${e}. Abortando.`);
+            return null; 
+         }
+       }
+       return f;
+    }
+
+    return null;
+  }
+
   addViewer() {
     if (this.isDestroyed) return;
     this.viewers++;
     if (this.cleanupTimer) {
-      console.log(`bust [KEEP ALIVE] Usuário voltou. Cancelando exclusão.`);
       clearTimeout(this.cleanupTimer);
       this.cleanupTimer = null;
     }
@@ -88,64 +138,45 @@ class StreamSession {
     this.viewers--;
     if (this.viewers <= 0) {
       this.viewers = 0;
-      // Evita agendar duplicado
       if (!this.cleanupTimer) {
-        console.log(`⏳ [GRACE PERIOD] Deletando em ${CONFIG.CLEANUP_GRACE_PERIOD}ms...`);
-        this.cleanupTimer = setTimeout(() => {
-          this.destroy();
-        }, CONFIG.CLEANUP_GRACE_PERIOD);
+        this.cleanupTimer = setTimeout(() => this.destroy(), CONFIG.CLEANUP_GRACE_PERIOD);
       }
     }
   }
 
   destroy() {
-    // TRAVA DE SEGURANÇA 2: Impede dupla destruição
     if (this.isDestroyed) return;
     this.isDestroyed = true;
-
-    console.log(`💥 [DESTROY] Limpando sessão ${this.infoHash || 'n/a'}...`);
-    
+    console.log(`💥 [DESTROY] Limpando sessão...`);
     if (this.cleanupTimer) clearTimeout(this.cleanupTimer);
-
-    if (this.infoHash && activeSessions.has(this.infoHash)) {
-      activeSessions.delete(this.infoHash);
-    }
+    if (this.infoHash && activeSessions.has(this.infoHash)) activeSessions.delete(this.infoHash);
 
     try {
-      // Verifica se o cliente já não morreu por outro motivo
       if (this.client && !this.client.destroyed) {
-        this.client.destroy(() => {
-           this.deleteFiles();
-        });
+        this.client.destroy(() => this.deleteFiles());
       } else {
         this.deleteFiles();
       }
-    } catch (e) {
-      console.error("Erro silencioso ao destruir:", e.message);
-      this.deleteFiles();
-    }
+    } catch (e) { this.deleteFiles(); }
   }
 
   deleteFiles() {
     if (fs.existsSync(this.folderPath)) {
-      fs.rm(this.folderPath, { recursive: true, force: true }, (err) => {
-        if (!err) console.log("🗑️ [CLEANED] Arquivos removidos.");
-      });
+      fs.rm(this.folderPath, { recursive: true, force: true }, () => {});
     }
   }
 }
 
 const activeSessions = new Map();
 
-app.get('/', (req, res) => res.send('Stream Engine: ON'));
+app.get('/', (req, res) => res.send('Smart Stream Engine: ON'));
 
 app.get('/stream', async (req, res) => {
-  const magnet = req.query.magnet;
+  const { magnet, season, episode } = req.query; 
+  
   if (!magnet) return res.status(400).json({ error: 'Magnet Link obrigatório' });
 
   let session;
-
-  // Reutiliza sessão se existir
   for (let s of activeSessions.values()) {
     if (s.magnet === magnet && !s.isDestroyed) {
       session = s;
@@ -155,7 +186,6 @@ app.get('/stream', async (req, res) => {
 
   try {
     if (!session) {
-      console.log(`✨ [NEW SESSION] Criando instância...`);
       session = new StreamSession(magnet);
       await session.initialize();
       activeSessions.set(session.infoHash, session);
@@ -163,7 +193,13 @@ app.get('/stream', async (req, res) => {
 
     session.addViewer();
 
-    const file = session.file;
+    const file = session.selectFile(season, episode);
+    
+    if (!file) {
+        session.removeViewer();
+        throw new Error("Episódio correto não encontrado neste torrent.");
+    }
+
     const range = req.headers.range;
 
     if (!range) {
@@ -195,49 +231,23 @@ app.get('/stream', async (req, res) => {
 
   } catch (error) {
     console.error("❌ [STREAM FAIL]", error.message);
-    return res.status(504).json({ error: 'Falha ao iniciar streaming.', details: error.message });
+    return res.status(504).json({ error: 'Falha ao processar arquivo.', details: error.message });
   }
 });
 
-// Manipulador de Eventos de Stream Seguro
 function handleStreamEvents(stream, req, session) {
   let closed = false;
-
   const closeStream = () => {
     if (closed) return;
     closed = true;
     stream.destroy();
     session.removeViewer();
   };
-
-  req.on('close', closeStream); // Usuário fechou aba
-  
+  req.on('close', closeStream);
   stream.on('error', (err) => {
-    // Ignora erro de fechamento prematuro (é normal quando usuário sai)
-    if (err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
-       closeStream();
-    } else {
-       console.error("Stream Error (Ignorado):", err.message);
-       closeStream();
-    }
+    if (err.code !== 'ERR_STREAM_PREMATURE_CLOSE') closeStream();
   });
 }
 
-// Limpeza inicial no boot
-fs.readdir(CONFIG.DOWNLOAD_ROOT, (err, files) => {
-    if(!err) {
-        files.forEach(file => {
-            const p = path.join(CONFIG.DOWNLOAD_ROOT, file);
-            fs.rm(p, { recursive: true, force: true }, () => {});
-        });
-        console.log("🧹 [BOOT] Limpeza inicial concluída.");
-    }
-});
-
-process.on('uncaughtException', (err) => {
-  console.log('🔥 [CRITICAL] Erro recuperado:', err.message);
-});
-
-app.listen(CONFIG.PORT, () => {
-  console.log(`🚀 Engine Rodando na porta ${CONFIG.PORT}`);
-});
+process.on('uncaughtException', (err) => {});
+app.listen(CONFIG.PORT, () => console.log(`🚀 Smart Engine Rodando na porta ${CONFIG.PORT}`));
