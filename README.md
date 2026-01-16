@@ -1,6 +1,6 @@
 # RamonFlix - Streaming Engine
 Link para acesso do sistema em produção: https://ramonflix.vercel.app/
-Horários entre as 20h e 8h estão sujeitos a maior latência de tráfego
+<br> Horários entre as 20h e 8h estão sujeitos a maior latência de tráfego
 
 Este repositório contém o microsserviço de streaming do ecossistema RamonFlix, desenvolvido em **Node.js**. Este serviço atua como um motor de processamento e transmissão de vídeo, responsável por conectar-se a redes descentralizadas (P2P), realizar o buffering de mídia e entregar um fluxo de vídeo compatível com navegadores web (HTTP Stream).
 
@@ -9,6 +9,10 @@ Este repositório contém o microsserviço de streaming do ecossistema RamonFlix
 O maior desafio técnico em aplicações de streaming baseadas em protocolos P2P (como BitTorrent) é que navegadores web modernos não suportam nativamente a reprodução direta desses protocolos.
 
 Este microsserviço resolve esse problema atuando como um **Protocol Bridge (Ponte de Protocolo)**. Ele recebe um Magnet Link, conecta-se aos "peers" da rede para baixar os fragmentos do arquivo sequencialmente e, em tempo real, converte esses dados em um stream de vídeo MP4 contínuo que pode ser consumido pela tag `<video>` do HTML5 no Frontend.
+
+Frontend: https://github.com/ramonpps/ramonflix-frontend/ <br>
+Backend: https://github.com/ramonpps/ramonflix-backend <br>
+Stream service: https://github.com/ramonpps/ramonflix-stream-service <br>
 
 > **Escopo de Demonstração:** Este serviço é agnóstico ao conteúdo. No contexto do projeto RamonFlix, ele é utilizado para demonstrar a transmissão de conteúdo Open Source (Creative Commons) em alta definição, validando a arquitetura de distribuição de carga.
 
